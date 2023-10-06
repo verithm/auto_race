@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+
+import rospy
+import numpy as np
+import os
+import cv2
+from cv_bridge import CvBridge
+from std_msgs.msg import Bool
+from sensor_msgs.msg import Image, CompressedImage
+from turtlebot3_autorace_2023.srv import SignParam, SignParamResponse
+
+class DetectSign():
+    def __init__(self):
+        self.fn_preprocess()
+
+        rospy.Service('/detect/sign', SignParam, self.cb_detect_sign)
+
+        self.sub_image_type = "raw"
+        self.pub_image_type = "compressed"
+
+        if self.sub_image_type == "raw":
+            rospy.Subscriber('/camera/image_compensated', Image, self.cb_find_sign, queue_size=1)
+        elif self.sub_image_type == "compressed":
+            rospy.Subscriber('/camera/image_compensated/compressed', CompressedImage, self.cb_find_sign, queue_size=1)
+
+        self.pub_activation_status = rospy.Publisher('/camera/image_compensation', Bool, queue_size=1)
+
+        if self.pub_image_type == "raw":
+            self.pub_image = rospy.Publisher('/sign/image', Image, queue_size=1)
+        elif self.pub_image_type == "compressed":
+            self.pub_image = rospy.Publisher('/sign/image/compressed', CompressedImage, queue_size=1)
+
+        self.cv_bridge = CvBridge()
+
+        self.MIN_MSE_DECISION = 50000
+
+        self.counter = 1
+
+    def fn_preprocess(self):
+        self.sift = cv2.xfeatures2d.SIFT_create()
+
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        dir_path = dir_path.replace('nodes/detect', 'image/')
+
+        self.image = dict(left=cv2.imread(dir_path + 'left.png', 0), right=cv2.imread(dir_path + 'right.png', 0),
+                          construction=cv2.imread(dir_path + 'construction.png', 0), parking=cv2.imread(dir_path + 'parking.png', 0),
+                          stop=cv2.imread(dir_path + 'stop.png', 0), tunnel=cv2.imread(dir_path + 'tunnel.png', 0))
+
+        self.key_pts, self.des = {}, {}
+        self.key_pts['left'], self.des['left'] = self.sift.detectAndCompute(self.image['left'], None)
+        self.key_pts['right'], self.des['right'] = self.sift.detectAndCompute(self.image['right'], None)
+        self.key_pts['construction'], self.des['construction'] = self.sift.detectAndCompute(self.image['construction'], None)
+        self.key_pts['parking'], self.des['parking'] = self.sift.detectAndCompute(self.image['parking'], None)
+        self.key_pts['stop'], self.des['stop'] = self.sift.detectAndCompute(self.image['stop'], None)
+        self.key_pts['tunnel'], self.des['tunnel'] = self.sift.detectAndCompute(self.image['tunnel'], None)
+
+        index_params = dict(algorithm=0, trees=5)
+        search_params = dict(checks=50)
+
+        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+    def cb_detect_sign(self, sign_status):
+        self.success = False
+        self.sign_type = sign_status.sign_type
+        self.pub_activation_status.publish(True)
+
+        rate = rospy.Rate(10)
+        while not rospy.is_shutdown() and not self.success:
+            rate.sleep()
+
+        self.pub_activation_status.publish(False)
+        return SignParamResponse(direction=self.direction) if self.sign_type == "intersection" else SignParamResponse()
+
+    def cb_find_sign(self, image_msg):
+        if self.counter % 3 != 0:
+            self.counter += 1
+            return
+        else:
+            self.counter = 1
+
+        if self.sub_image_type == "raw":
+            self.image['target'] = self.cv_bridge.imgmsg_to_cv2(image_msg, "mono8")
+        elif self.sub_image_type == "compressed":
+            self.image['target'] = self.cv_bridge.compressed_imgmsg_to_cv2(image_msg, "mono8")
+
+        self.key_pts['target'], self.des['target'] = self.sift.detectAndCompute(self.image['target'], None)
+
+        self.src_pts = {}
+        self.dst_pts = {}
+        self.good_sign = {}
+
+        if self.sign_type == "intersection":
+            self.MIN_MATCH_COUNT = 9
+
+            is_left, left_MSE = self.fn_find_sign('left')
+            is_right, right_MSE = self.fn_find_sign('right')
+
+            if is_left and is_right:
+                if left_MSE > right_MSE:
+                    is_left = False
+                else:
+                    is_right = False
+
+            if is_left:
+                self.direction = 'left'
+                self.fn_detect_sign('left')
+            elif is_right:
+                self.direction = 'right'
+                self.fn_detect_sign('right')
+
+        else:
+            if self.sign_type == "construction":
+                self.MIN_MATCH_COUNT = 8
+            elif self.sign_type == "parking":
+                self.MIN_MATCH_COUNT = 9
+            elif self.sign_type == "stop":
+                self.MIN_MATCH_COUNT = 4
+            elif self.sign_type == "tunnel":
+                self.MIN_MATCH_COUNT = 5
+
+            is_sign, _ = self.fn_find_sign(self.sign_type)
+
+            if is_sign:
+                self.fn_detect_sign(self.sign_type)
+
+        if self.pub_image_type == "raw":
+            self.pub_image.publish(self.cv_bridge.cv2_to_imgmsg(self.image['target'], "bgr8"))
+        elif self.pub_image_type == "compressed":
+            self.pub_image.publish(self.cv_bridge.cv2_to_compressed_imgmsg(self.image['target'], "jpg"))
+
+    def fn_find_sign(self, sign_type):
+        matches_sign = self.flann.knnMatch(self.des['target'], self.des[sign_type], k=2)
+
+        self.good_sign[sign_type] = []
+        for m, n in matches_sign:
+            if m.distance < 0.7 * n.distance:
+                self.good_sign[sign_type].append(m)
+
+        if len(self.good_sign[sign_type]) > self.MIN_MATCH_COUNT:
+            self.src_pts[sign_type] = np.array([self.key_pts['target'][m.queryIdx].pt for m in self.good_sign[sign_type]])
+            self.dst_pts[sign_type] = np.array([self.key_pts[sign_type][m.trainIdx].pt for m in self.good_sign[sign_type]])
+
+            MSE = self.fn_calculate_MSE(self.src_pts[sign_type], self.src_pts[sign_type])
+            if MSE < self.MIN_MSE_DECISION:
+                return True, MSE
+
+        return False, None
+
+    def fn_detect_sign(self, sign_type):
+        self.success = True
+
+        _, mask = cv2.findHomography(self.src_pts[sign_type], self.dst_pts[sign_type], cv2.RANSAC, 5.0)
+        matches_sign = mask.ravel().tolist()
+
+        draw_params = dict(matchColor=(255, 0, 0), singlePointColor=None, matchesMask=matches_sign,
+                           flags=cv2.DRAW_MATCHES_FLAGS_NOT_DRAW_SINGLE_POINTS)
+
+        self.image['target'] = cv2.drawMatches(self.image['target'], self.key_pts['target'],
+                                               self.image[sign_type], self.key_pts[sign_type],
+                                               self.good_sign[sign_type], None, **draw_params)
+
+    def fn_calculate_MSE(self, predict, target):
+        cost = (predict - target) ** 2
+        cost_sum = np.sum(cost)
+        return cost_sum / predict.size
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('detect_sign')
+        node = DetectSign()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass

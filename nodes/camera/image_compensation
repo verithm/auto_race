@@ -1,0 +1,108 @@
+#!/usr/bin/env python
+
+import rospy
+import numpy as np
+import cv2
+from cv_bridge import CvBridge
+from std_msgs.msg import Bool
+from sensor_msgs.msg import Image, CompressedImage
+
+class ImageCompensation():
+    def __init__(self):
+        self.clip_hist_percent = rospy.get_param("~compensation/clip_hist_percent")
+
+        self.is_activate = False
+
+        rospy.Subscriber('/camera/image_compensation', Bool, self.cb_get_activation_status, queue_size=1)
+
+        self.sub_image_type = "compressed"
+        self.pub_image_type = "raw"
+
+        if self.sub_image_type == "raw":
+            self.sub_image = rospy.Subscriber('/camera/image', Image, self.cb_image_compensation, queue_size=1)
+        elif self.sub_image_type == "compressed":
+            self.sub_image = rospy.Subscriber('/camera/image/compressed', CompressedImage, self.cb_image_compensation, queue_size=1)
+
+        if self.sub_image_type == "raw":
+            self.sub_image_projected = rospy.Subscriber('/camera/image_projected', Image, self.cb_projected_image_compensation, queue_size=1)
+        elif self.sub_image_type == "compressed":
+            self.sub_image_projected = rospy.Subscriber('/camera/image_projected/compressed', CompressedImage, self.cb_projected_image_compensation, queue_size=1)
+
+        if self.pub_image_type == "raw":
+            self.pub_image_compensated = rospy.Publisher('/camera/image_compensated', Image, queue_size=1)
+        elif self.pub_image_type == "compressed":
+            self.pub_image_compensated = rospy.Publisher('/camera/image_compensated/compressed', CompressedImage, queue_size=1)
+
+        if self.pub_image_type == "raw":
+            self.pub_image_projected_compensated = rospy.Publisher('/camera/image_projected_compensated', Image, queue_size=1)
+        elif self.pub_image_type == "compressed":
+            self.pub_image_projected_compensated = rospy.Publisher('/camera/image_projected_compensated/compressed', CompressedImage, queue_size=1)
+
+        self.cv_bridge = CvBridge()
+
+        self.hist_size = 256
+
+    def cb_get_activation_status(self, activation_status):
+        self.is_activate = activation_status.data
+
+    def cb_image_compensation(self, image_msg):
+        if self.is_activate:
+            self.fn_image_compensation(image_msg, True)
+
+    def cb_projected_image_compensation(self, image_msg):
+        self.fn_image_compensation(image_msg, False)
+
+    def fn_image_compensation(self, image_msg, image_is_original):
+        if self.sub_image_type == "raw":
+            image = self.cv_bridge.imgmsg_to_cv2(image_msg, "bgr8")
+        elif self.sub_image_type == "compressed":
+            image = self.cv_bridge.compressed_imgmsg_to_cv2(image_msg, "bgr8")
+
+        clip_hist_percent = self.clip_hist_percent
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        if clip_hist_percent == 0:
+            min_gray, max_gray, _, _ = cv2.minMaxLoc(gray)
+        else:
+            hist = cv2.calcHist([gray], [0], None, [self.hist_size], [0, self.hist_size])
+
+            accumulator = np.cumsum(hist)
+
+            max = accumulator[self.hist_size - 1]
+
+            clip_hist_percent *= max / 200.
+
+            min_gray = 0
+            while accumulator[min_gray] < clip_hist_percent:
+                min_gray += 1
+
+            max_gray = self.hist_size - 1
+            while accumulator[max_gray] >= max - clip_hist_percent:
+                max_gray -= 1
+
+        input_range = max_gray - min_gray
+
+        alpha = (self.hist_size - 1) / input_range
+        beta = -min_gray * alpha
+
+        image = cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
+
+        if image_is_original:
+            if self.pub_image_type == "raw":
+                self.pub_image_compensated.publish(self.cv_bridge.cv2_to_imgmsg(image, "bgr8"))
+            elif self.pub_image_type == "compressed":
+                self.pub_image_compensated.publish(self.cv_bridge.cv2_to_compressed_imgmsg(image, "jpg"))
+        else:
+            if self.pub_image_type == "raw":
+                self.pub_image_projected_compensated.publish(self.cv_bridge.cv2_to_imgmsg(image, "bgr8"))
+            elif self.pub_image_type == "compressed":
+                self.pub_image_projected_compensated.publish(self.cv_bridge.cv2_to_compressed_imgmsg(image, "jpg"))
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('image_compensation')
+        node = ImageCompensation()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass

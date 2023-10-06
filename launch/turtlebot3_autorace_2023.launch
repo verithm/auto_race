@@ -1,0 +1,19 @@
+<launch>
+	<node pkg="turtlebot3_autorace_2023" type="core" name="core" output="screen"/>
+	<node pkg="turtlebot3_autorace_2023" type="control_traffic_light" name="control_traffic_light" output="screen"/>
+	<node pkg="turtlebot3_autorace_2023" type="control_intersection" name="control_intersection" output="screen"/>
+	<node pkg="turtlebot3_autorace_2023" type="image_projection" name="image_projection" output="screen">
+		<rosparam command="load" file="$(find turtlebot3_autorace_2023)/param/projection.yaml"/>
+	</node>
+	<node pkg="turtlebot3_autorace_2023" type="image_compensation" name="image_compensation" output="screen">
+		<rosparam command="load" file="$(find turtlebot3_autorace_2023)/param/compensation.yaml"/>
+	</node>
+	<node pkg="turtlebot3_autorace_2023" type="detect_lane" name="detect_lane" output="screen">
+		<rosparam command="load" file="$(find turtlebot3_autorace_2023)/param/lane.yaml"/>
+	</node>
+	<node pkg="turtlebot3_autorace_2023" type="detect_sign" name="detect_sign" output="screen"/>
+	<node pkg="turtlebot3_autorace_2023" type="detect_traffic_light" name="detect_traffic_light" output="screen">
+		<rosparam command="load" file="$(find turtlebot3_autorace_2023)/param/traffic_light.yaml"/>
+	</node>
+	<node pkg="turtlebot3_autorace_2023" type="driving" name="driving" output="screen"/>
+</launch>

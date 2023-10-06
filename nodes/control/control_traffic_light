@@ -1,0 +1,34 @@
+#!/usr/bin/env python
+
+import rospy
+from turtlebot3_autorace_2023.msg import TrackingParam
+from std_srvs.srv import Trigger
+
+class TrafficLightController():
+    def __init__(self):
+        rospy.wait_for_service('/detect/traffic_light')
+        self.client_detection = rospy.ServiceProxy('/detect/traffic_light', Trigger)
+
+        rospy.Service('/traffic_light', Trigger, self.cb_traffic_light)
+
+        self.pub_tracking = rospy.Publisher('/detect/lane', TrackingParam, queue_size=1)
+
+    def cb_traffic_light(self, _):
+        try:
+            response = self.client_detection()
+            if response.success:
+                tracking_param = TrackingParam()
+                tracking_param.track_yellow = True
+                tracking_param.track_white = True
+                self.pub_tracking.publish(tracking_param)
+            return response
+        except rospy.ServiceException as e:
+            print("Service call failed: %s"%e)
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('control_traffic_light')
+        node = TrafficLightController()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass

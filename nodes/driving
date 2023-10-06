@@ -1,0 +1,52 @@
+#!/usr/bin/env python
+
+import rospy
+from std_msgs.msg import Float64
+from geometry_msgs.msg import Twist
+
+class ControlLane():
+    def __init__(self):
+        self.sub_center = rospy.Subscriber('/driving/center', Float64, self.cb_follow_lane, queue_size=1)
+        self.pub_cmd_vel = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+
+        self.previous_error = 0
+
+        rospy.on_shutdown(self.fn_shut_down)
+
+    def cb_follow_lane(self, center):
+        error = center.data - 500
+
+        Kp = 0.0025
+        Kd = 0.007
+
+        angular_z = Kp * error + Kd * (error - self.previous_error)
+        self.previous_error = error
+
+        twist = Twist()
+        twist.linear.x = 0.05
+        twist.linear.y = 0
+        twist.linear.z = 0
+        twist.angular.x = 0
+        twist.angular.y = 0
+        twist.angular.z = -max(angular_z, -2) if angular_z < 0 else -min(angular_z, 2)
+        self.pub_cmd_vel.publish(twist)
+
+    def fn_shut_down(self):
+        rospy.loginfo("Shutting down. cmd_vel will be 0")
+
+        twist = Twist()
+        twist.linear.x = 0
+        twist.linear.y = 0
+        twist.linear.z = 0
+        twist.angular.x = 0
+        twist.angular.y = 0
+        twist.angular.z = 0
+        self.pub_cmd_vel.publish(twist)
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('driving')
+        node = ControlLane()
+        rospy.spin()
+    except rospy.ROSInterruptException():
+        pass

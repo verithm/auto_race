@@ -1,0 +1,10 @@
+traffic_light:
+  red:
+    lower: [0, 239, 123]
+    upper: [26, 255, 250]
+  yellow:
+    lower: [19, 237, 231]
+    upper: [33, 255, 255]
+  green:
+    lower: [40, 210, 131]
+    upper: [113, 255, 255]

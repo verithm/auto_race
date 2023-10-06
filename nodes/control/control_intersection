@@ -1,0 +1,34 @@
+#!/usr/bin/env python
+
+import rospy
+from turtlebot3_autorace_2023.msg import TrackingParam
+from std_srvs.srv import Empty, EmptyResponse
+from turtlebot3_autorace_2023.srv import SignParam
+
+class IntersectionController():
+    def __init__(self):
+        rospy.wait_for_service('/detect/sign')
+        self.client_detection = rospy.ServiceProxy('/detect/sign', SignParam)
+
+        rospy.Service('/intersection', Empty, self.cb_intersection)
+
+        self.pub_tracking = rospy.Publisher('/detect/lane', TrackingParam, queue_size=1)
+
+    def cb_intersection(self, _):
+        try:
+            response = self.client_detection("intersection")
+            tracking_param = TrackingParam()
+            tracking_param.track_yellow = response.direction == 'left'
+            tracking_param.track_white = response.direction == 'right'
+            self.pub_tracking.publish(tracking_param)
+            return EmptyResponse()
+        except rospy.ServiceException as e:
+            print("Service call failed: %s"%e)
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('control_intersection')
+        node = IntersectionController()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass

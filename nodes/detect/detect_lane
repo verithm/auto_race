@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+
+import rospy
+import numpy as np
+import cv2
+from cv_bridge import CvBridge
+from std_msgs.msg import Bool, Float64
+from sensor_msgs.msg import Image, CompressedImage
+from turtlebot3_autorace_2023.msg import TrackingParam
+
+class DetectLane():
+    def __init__(self):
+        self.threshold = rospy.get_param("~lane")
+
+        self.track_yellow = False
+        self.track_white = False
+
+        rospy.Subscriber('/detect/lane', TrackingParam, self.cb_get_tracking_status, queue_size=1)
+
+        self.sub_image_type = "raw"
+        self.pub_image_type = "compressed"
+
+        if self.sub_image_type == "raw":
+            rospy.Subscriber('/camera/image_projected_compensated', Image, self.cb_find_lane, queue_size=1)
+        elif self.sub_image_type == "compressed":
+            rospy.Subscriber('/camera/image_projected_compensated/compressed', CompressedImage, self.cb_find_lane, queue_size=1)
+
+        self.pub_activation_status = rospy.Publisher('/camera/image_projection', Bool, queue_size=1)
+
+        if self.pub_image_type == "raw":
+            self.pub_image = rospy.Publisher('/lane/image', Image, queue_size=1)
+        elif self.pub_image_type == "compressed":
+            self.pub_image = rospy.Publisher('/lane/image/compressed', CompressedImage, queue_size=1)
+
+        self.pub_center = rospy.Publisher('/driving/center', Float64, queue_size=1)
+
+        self.cv_bridge = CvBridge()
+
+        self.counter = 1
+
+    def cb_get_tracking_status(self, tracking_status):
+        self.track_yellow = tracking_status.track_yellow
+        self.track_white = tracking_status.track_white
+        self.pub_activation_status.publish(self.track_yellow or self.track_white)
+
+    def cb_find_lane(self, image_msg):
+        if self.counter % 3 != 0:
+            self.counter += 1
+            return
+        else:
+            self.counter = 1
+
+        if self.sub_image_type == "raw":
+            image = self.cv_bridge.imgmsg_to_cv2(image_msg, "bgr8")
+        elif self.sub_image_type == "compressed":
+            image = self.cv_bridge.compressed_imgmsg_to_cv2(image_msg, "bgr8")
+
+        self.y = np.arange(image.shape[0])
+
+        self.found_yellow_lane = True
+        self.found_white_lane = True
+
+        try:
+            yellow_lane = self.mask_lane(image, 'yellow')
+            self.left_x = self.fit_from_lane(yellow_lane)
+        except TypeError:
+            self.found_yellow_lane = False
+
+        try:
+            white_lane = self.mask_lane(image, 'white')
+            self.right_x = self.fit_from_lane(white_lane)
+        except TypeError:
+            self.found_white_lane = False
+
+        try:
+            self.make_lane(image)
+        except TypeError:
+            print("[ERROR] TurtleBot3 has deviated from the road!")
+
+    def mask_lane(self, image, color):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        mask = cv2.inRange(hsv, np.array(self.threshold[color]['lower']), np.array(self.threshold[color]['upper']))
+
+        fraction = np.count_nonzero(mask)
+
+        if color == 'yellow':
+            mask[:, mask.shape[1] // 2:] = 0
+            if fraction > 35000:
+                if self.threshold['yellow']['lower'][2] < 250:
+                    self.threshold['yellow']['lower'][2] += 20
+            elif fraction < 3000:
+                if self.threshold['yellow']['lower'][2] > 90:
+                    self.threshold['yellow']['lower'][2] -= 20
+        elif color == 'white':
+            mask[:, :mask.shape[1] // 2] = 0
+            if fraction > 35000:
+                if self.threshold['white']['lower'][2] < 250:
+                    self.threshold['white']['lower'][2] += 5
+            elif fraction < 3000:
+                if self.threshold['white']['lower'][2] > 50:
+                    self.threshold['white']['lower'][2] -= 5
+
+        return mask
+
+    def fit_from_lane(self, image):
+        nonzero = image.nonzero()
+        coef = np.polyfit(nonzero[0], nonzero[1], 2)
+        return np.polyval(coef, self.y)
+
+    def make_lane(self, image):
+        road_overlay = np.zeros((image.shape[0], image.shape[1], 3), dtype=np.uint8)
+        lane_overlay = np.zeros((image.shape[0], image.shape[1], 3), dtype=np.uint8)
+
+        track_left = False
+        track_right = False
+
+        if self.track_yellow or self.found_yellow_lane and 0 < int(image.shape[1] / 2 - self.left_x[350]) < 274:
+            track_left = True
+            left_pts = np.column_stack((self.left_x.astype(int), self.y)).reshape(-1, 1, 2)
+            cv2.polylines(lane_overlay, [left_pts], isClosed=False, color=(0, 0, 255), thickness=25)
+        if self.track_white or self.found_white_lane and 0 < int(self.right_x[350] - image.shape[1] / 2) < 274:
+            track_right = True
+            right_pts = np.column_stack((self.right_x.astype(int), self.y))[::-1].reshape(-1, 1, 2)
+            cv2.polylines(lane_overlay, [right_pts], isClosed=False, color=(255, 255, 0), thickness=25)
+
+        if track_left and track_right:
+            road_pts = np.concatenate((left_pts, right_pts))
+            cv2.fillPoly(road_overlay, [road_pts], color=(0, 255, 0))
+            center_x = ((self.left_x + self.right_x) / 2).astype(int)
+        elif track_left:
+            center_x = np.add(self.left_x.astype(int), 284)
+        elif track_right:
+            center_x = np.subtract(self.right_x.astype(int), 284)
+        center_pts = np.column_stack((center_x, self.y)).reshape(-1, 1, 2)
+        cv2.polylines(lane_overlay, [center_pts], isClosed=False, color=(0, 255, 255), thickness=12)
+
+        image = cv2.addWeighted(image, 1, road_overlay, 0.2, 0)
+        image = cv2.addWeighted(image, 1, lane_overlay, 1, 0)
+
+        center_msg = Float64()
+        center_msg.data = center_x.item(350)
+        self.pub_center.publish(center_msg)
+
+        if self.pub_image_type == "raw":
+            self.pub_image.publish(self.cv_bridge.cv2_to_imgmsg(image, "bgr8"))
+        elif self.pub_image_type == "compressed":
+            self.pub_image.publish(self.cv_bridge.cv2_to_compressed_imgmsg(image, "jpg"))
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('detect_lane')
+        node = DetectLane()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass

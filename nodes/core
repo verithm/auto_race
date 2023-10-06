@@ -1,0 +1,26 @@
+#!/usr/bin/env python
+
+import rospy
+from std_srvs.srv import Empty, Trigger
+
+class CoreModeDecider():
+    def __init__(self):
+        rospy.wait_for_service('/traffic_light')
+        client_traffic_light = rospy.ServiceProxy('/traffic_light', Trigger)
+        response = client_traffic_light()
+        if response.success:
+            print("[SUCCESS] Mission 1: Traffic Lights (1 / 6)")
+        else:
+            rospy.signal_shutdown("[FAILED] Mission 1: Traffic Lights (1 / 6)")
+
+        rospy.wait_for_service('/intersection')
+        client_intersection = rospy.ServiceProxy('/intersection', Empty)
+        client_intersection()
+        print("[SUCCESS] Mission 2: Intersection (2 / 6)")
+
+if __name__ == '__main__':
+    try:
+        rospy.init_node('core')
+        node = CoreModeDecider()
+    except rospy.ROSInterruptException():
+        pass
